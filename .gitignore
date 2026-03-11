@@ -1,9 +1,18 @@
-/.idea/
-/.vscode/
-/dist/
-.DS_Store
-/*.pprof
-/*.txt
-/golangci-lint
-/golangci-lint.exe
-/example.so
+# Скомпилированные плагины
+*.so
+
+# Временные файлы
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

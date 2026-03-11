@@ -1,0 +1,13 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - loglinter
+
+  settings:
+    custom:
+      loglinter:
+        path: ./loglinter.so  # путь к плагину после сборки
+        description: "Линтер для проверки лог-сообщений"
+        original-url: github.com/BleSSSeDDD/log-linter
