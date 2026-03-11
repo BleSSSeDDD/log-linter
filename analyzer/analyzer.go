@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"go/ast"
+	"go/token"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
@@ -25,21 +26,51 @@ func run(pass *analysis.Pass) (interface{}, error) {
 
 	inspect.Preorder(nodeFilter, func(n ast.Node) {
 		call := n.(*ast.CallExpr)
-		sel, ok := call.Fun.(*ast.SelectorExpr)
+		_, ok := call.Fun.(*ast.SelectorExpr)
 		if !ok {
 			return
 		}
 
-		if sel.Sel.Name != "Println" {
+		// === ВАЖНО: временно убираем жесткую фильтрацию, чтобы видеть все логи ===
+		// if sel.Sel.Name != "Println" {
+		// 	return
+		// }
+
+		// ident, ok := sel.X.(*ast.Ident)
+		// if !ok || ident.Name != "log" {
+		// 	return
+		// }
+
+		// pass.Reportf(call.Pos(), "нашел log функцию")
+
+		// === НОВАЯ ЛОГИКА: проверяем, что это вообще вызов метода (X.Y) ===
+		// Это выражение вида log.Info, logger.Println, slog.Error и т.д.
+		// Мы пока не проверяем пакет, чтобы увидеть всё, что может быть логом.
+		// Позже здесь нужно будет добавить вызов isLogFunction(pass, call)
+
+		// Пытаемся извлечь сообщение (первый аргумент-строку)
+		if len(call.Args) == 0 {
+			return
+		}
+		firstArg := call.Args[0]
+		lit, ok := firstArg.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			// Если первый аргумент не строка (например, переменная или конкатенация),
+			// мы пока не можем его проверить. Это задача на будущее.
 			return
 		}
 
-		ident, ok := sel.X.(*ast.Ident)
-		if !ok || ident.Name != "log" {
-			return
+		// Извлекаем текст сообщения, убирая кавычки
+		msg := strings.Trim(lit.Value, `"`)
+
+		// Применяем проверки
+		if !isValidLogMessage(msg) {
+			pass.Reportf(call.Pos(), "лог-сообщение содержит недопустимые символы (только англ буквы и пробелы, начинаться со строчной): %q", msg)
 		}
 
-		pass.Reportf(call.Pos(), "нашел log функцию")
+		if containsSensitiveData(msg) {
+			pass.Reportf(call.Pos(), "лог-сообщение содержит потенциально чувствительные данные: %q", msg)
+		}
 	})
 
 	return nil, nil
