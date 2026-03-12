@@ -9,6 +9,6 @@ func New(conf any) ([]*analysis.Analyzer, error) {
 	// TODO: конфиг потом тут будет
 
 	return []*analysis.Analyzer{
-		analyzer.Analyzer,
+		analyzer.LogAnalyzer,
 	}, nil
 }

@@ -10,7 +10,7 @@ import (
 	"golang.org/x/tools/go/ast/inspector"
 )
 
-var Analyzer = &analysis.Analyzer{
+var LogAnalyzer = &analysis.Analyzer{
 	Name:     "loglinter",
 	Doc:      "вот бы оно завелось хотя бы",
 	Run:      run,
@@ -24,78 +24,79 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		(*ast.CallExpr)(nil),
 	}
 
-	inspect.Preorder(nodeFilter, func(n ast.Node) {
-		call := n.(*ast.CallExpr)
-		_, ok := call.Fun.(*ast.SelectorExpr)
+	inspect.Preorder(nodeFilter, func(node ast.Node) {
+		call := node.(*ast.CallExpr)
+
+		// проверяем, что это вызов метода, а не просто какой-то функции
+		selector, isMethod := call.Fun.(*ast.SelectorExpr)
+		if !isMethod {
+			return
+		}
+
+		// проверяем, что метод вызывается у обычной переменной
+		ident, ok := selector.X.(*ast.Ident)
 		if !ok {
 			return
 		}
 
-		// === ВАЖНО: временно убираем жесткую фильтрацию, чтобы видеть все логи ===
-		// if sel.Sel.Name != "Println" {
-		// 	return
-		// }
+		// берем тип переменной
+		obj := pass.TypesInfo.ObjectOf(ident)
+		if obj == nil {
+			return
+		}
 
-		// ident, ok := sel.X.(*ast.Ident)
-		// if !ok || ident.Name != "log" {
-		// 	return
-		// }
+		// проверяем, что переменная импортирована из пакета log или slog
+		if pkg := obj.Pkg(); pkg == nil || pkg.Path() != "log" || pkg.Path() != "log/slog" {
+			return
+		}
 
-		// pass.Reportf(call.Pos(), "нашел log функцию")
-
-		// === НОВАЯ ЛОГИКА: проверяем, что это вообще вызов метода (X.Y) ===
-		// Это выражение вида log.Info, logger.Println, slog.Error и т.д.
-		// Мы пока не проверяем пакет, чтобы увидеть всё, что может быть логом.
-		// Позже здесь нужно будет добавить вызов isLogFunction(pass, call)
-
-		// Пытаемся извлечь сообщение (первый аргумент-строку)
 		if len(call.Args) == 0 {
 			return
 		}
-		firstArg := call.Args[0]
-		lit, ok := firstArg.(*ast.BasicLit)
-		if !ok || lit.Kind != token.STRING {
-			// Если первый аргумент не строка (например, переменная или конкатенация),
-			// мы пока не можем его проверить. Это задача на будущее.
-			return
-		}
 
-		// Извлекаем текст сообщения, убирая кавычки
-		msg := strings.Trim(lit.Value, `"`)
+		for _, arg := range call.Args {
+			// проверяем что аргумент это именно строка, а не переменная, число, вызов функции и тп
+			argLiteral, isLiteral := arg.(*ast.BasicLit)
+			if !isLiteral || argLiteral.Kind != token.STRING {
+				continue
+			}
 
-		// Применяем проверки
-		if !isValidLogMessage(msg) {
-			pass.Reportf(call.Pos(), "лог-сообщение содержит недопустимые символы (только англ буквы и пробелы, начинаться со строчной): %q", msg)
-		}
+			str_arg := strings.Trim(argLiteral.Value, `"`)
+			if !isValidLogMessage(str_arg) {
+				pass.Reportf(call.Pos(), "лог-сообщение содержит недопустимые символы %q", str_arg)
+			}
 
-		if containsSensitiveData(msg) {
-			pass.Reportf(call.Pos(), "лог-сообщение содержит потенциально чувствительные данные: %q", msg)
+			if containsSensitiveData(str_arg) {
+				pass.Reportf(call.Pos(), "лог-сообщение содержит потенциально чувствительные данные: %q", str_arg)
+			}
 		}
 	})
 
 	return nil, nil
 }
 
-func isValidLogMessage(msg string) bool {
-	if msg == "" {
+func isValidLogMessage(str_arg string) bool {
+	if str_arg == "" {
 		return false
 	}
 
-	// в начале должна быть строчная английская буква
-	first := msg[0]
-	if first < 'a' || first > 'z' {
-		return false
-	}
-
-	// а дальше в любом регистре или пробел получается, хотя если в логе например путь какой-то, то ещё слэши бы сюда
-	// ну сказано без спецсимволов значит будет без спецсимволов
-	for i := 1; i < len(msg); i++ {
-		c := msg[i]
-		if (c >= 'a' && c <= 'z') ||
-			(c >= 'A' && c <= 'Z') ||
-			c == ' ' {
+	for i := range []rune(str_arg) {
+		// в начале должна быть строчная английская буква
+		if i == 0 {
+			if str_arg[i] < 'a' || str_arg[i] > 'z' {
+				return false
+			}
 			continue
 		}
+		// а дальше в любом регистре или пробел получается, хотя если в логе например путь какой-то, то ещё слэши бы сюда
+		// ну сказано без спецсимволов значит будет без спецсимволов
+		if (str_arg[i] >= 'a' && str_arg[i] <= 'z') ||
+			(str_arg[i] >= 'A' && str_arg[i] <= 'Z') ||
+			(str_arg[i] >= '0' && str_arg[i] <= '9') ||
+			str_arg[i] == ' ' {
+			continue
+		}
+
 		return false
 	}
 
@@ -103,8 +104,8 @@ func isValidLogMessage(msg string) bool {
 }
 
 // пока максимально тупая проверка потом можно думать
-func containsSensitiveData(s string) bool {
-	lower := strings.ToLower(s)
+func containsSensitiveData(str_arg string) bool {
+	lower := strings.ToLower(str_arg)
 	sensitive := []string{
 		"password", "token", "secret", "key", "auth",
 	}
