@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/BleSSSeDDD/log-linter/analyzer"
+	analyzer "github.com/BleSSSeDDD/log-linter/log-analyzer"
 	"golang.org/x/tools/go/analysis"
 )
 
