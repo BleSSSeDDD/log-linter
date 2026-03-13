@@ -26,10 +26,19 @@ go build -buildmode=plugin -o loglinter.so plugin/plugin.go
 
 В .golangci.yml:
 ```yaml
-linters-settings:
-  custom:
-    loglinter:
-      path: ./loglinter.so
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - loglinter
+
+  settings:
+    custom:
+      loglinter:
+        path: ./loglinter.so
+        description: "Линтер для проверки лог-сообщений"
+        original-url: github.com/BleSSSeDDD/log-linter
 ```
 
 ## Запуск
