@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"strings"
+	"unicode"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
@@ -12,7 +13,7 @@ import (
 
 var LogAnalyzer = &analysis.Analyzer{
 	Name:     "loglinter",
-	Doc:      "вот бы оно завелось хотя бы",
+	Doc:      "проверка лог-сообщенгий на валидность",
 	Run:      run,
 	Requires: []*analysis.Analyzer{inspect.Analyzer},
 }
@@ -20,6 +21,7 @@ var LogAnalyzer = &analysis.Analyzer{
 func run(pass *analysis.Pass) (interface{}, error) {
 	inspect := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
 
+	// нам нужны только вызовы функций
 	nodeFilter := []ast.Node{
 		(*ast.CallExpr)(nil),
 	}
@@ -27,26 +29,8 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	inspect.Preorder(nodeFilter, func(node ast.Node) {
 		call := node.(*ast.CallExpr)
 
-		// проверяем, что это вызов метода, а не просто какой-то функции
-		selector, isMethod := call.Fun.(*ast.SelectorExpr)
-		if !isMethod {
-			return
-		}
-
-		// проверяем, что метод вызывается у обычной переменной
-		ident, ok := selector.X.(*ast.Ident)
-		if !ok {
-			return
-		}
-
-		// берем тип переменной
-		obj := pass.TypesInfo.ObjectOf(ident)
-		if obj == nil {
-			return
-		}
-
-		// проверяем, что переменная импортирована из пакета log или slog
-		if pkg := obj.Pkg(); pkg == nil || pkg.Path() != "log" || pkg.Path() != "log/slog" {
+		// проверяем, что это вызов методов логгера
+		if !isLogMethodCall(pass, call) {
 			return
 		}
 
@@ -54,20 +38,29 @@ func run(pass *analysis.Pass) (interface{}, error) {
 			return
 		}
 
-		for _, arg := range call.Args {
-			// проверяем что аргумент это именно строка, а не переменная, число, вызов функции и тп
-			argLiteral, isLiteral := arg.(*ast.BasicLit)
-			if !isLiteral || argLiteral.Kind != token.STRING {
-				continue
-			}
+		for i, arg := range call.Args {
+			// рекурсивно получаем текст (для поиска чувствительных данных даже в конкатенации или именах переменных)
+			fullContent := recursiveExtractText(arg)
 
-			str_arg := strings.Trim(argLiteral.Value, `"`)
-			if !isValidLogMessage(str_arg) {
-				pass.Reportf(call.Pos(), "лог-сообщение содержит недопустимые символы %q", str_arg)
+			// проверка на чувствительные данные
+			if containsSensitiveData(fullContent) {
+				pass.Reportf(arg.Pos(), "аргумент лога содержит потенциально чувствительные данные: %q", fullContent)
 			}
+			//проверка строковых литералов
+			if argLiteral, ok := arg.(*ast.BasicLit); ok && argLiteral.Kind == token.STRING {
+				strArg := strings.Trim(argLiteral.Value, "`\"")
 
-			if containsSensitiveData(str_arg) {
-				pass.Reportf(call.Pos(), "лог-сообщение содержит потенциально чувствительные данные: %q", str_arg)
+				if i == 0 {
+					// для первого аргумента (основное сообщение)
+					if !isValidLogMessage(strArg) {
+						pass.Reportf(argLiteral.Pos(), "лог-сообщение должно начинаться со строчной буквы, быть на английском и не содержать спецсимволы: %q", strArg)
+					}
+				} else {
+					// для остальных аргументов (ключи/значения) проверяем только английский и отсутствие спецсимволов
+					if !isEnglishAndSafe(strArg, false) {
+						pass.Reportf(argLiteral.Pos(), "дополнительный аргумент лога содержит недопустимые символы или не на английском: %q", strArg)
+					}
+				}
 			}
 		}
 	})
@@ -75,43 +68,141 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	return nil, nil
 }
 
-func isValidLogMessage(str_arg string) bool {
-	if str_arg == "" {
+// определяет, принадлежит ли вызов логгерам через анализ типов
+func isLogMethodCall(pass *analysis.Pass, call *ast.CallExpr) bool {
+	var sel *ast.SelectorExpr
+
+	switch fun := call.Fun.(type) {
+	case *ast.SelectorExpr:
+		sel = fun
+	case *ast.Ident:
+		return false
+	default:
 		return false
 	}
 
-	for i := range []rune(str_arg) {
-		// в начале должна быть строчная английская буква
-		if i == 0 {
-			if str_arg[i] < 'a' || str_arg[i] > 'z' {
+	// чтобы видеть методы через интерфейсы используем TypesInfo
+	selection, ok := pass.TypesInfo.Selections[sel]
+	if !ok {
+		// eсли это вызов функции пакета, а не метода объекта (например log.Println)
+		obj := pass.TypesInfo.Uses[sel.Sel]
+		if obj == nil || obj.Pkg() == nil {
+			return false
+		}
+		return isLogPackage(obj.Pkg().Path()) && isLogMethodName(sel.Sel.Name)
+	}
+
+	pkg := selection.Obj().Pkg()
+	if pkg == nil {
+		return false
+	}
+
+	return isLogPackage(pkg.Path()) && isLogMethodName(selection.Obj().Name())
+}
+
+func isLogPackage(path string) bool {
+	return path == "log" || path == "log/slog" || path == "go.uber.org/zap"
+}
+
+func isLogMethodName(name string) bool {
+	methods := map[string]bool{
+		"Info": true, "Infof": true, "Infoln": true,
+		"Error": true, "Errorf": true, "Errorln": true,
+		"Warn": true, "Warnf": true, "Warnln": true,
+		"Debug": true, "Debugf": true, "Debugln": true,
+		"Fatal": true, "Fatalf": true, "Fatalln": true,
+		"Print": true, "Printf": true, "Println": true,
+		"Panic": true, "Panicf": true, "Panicln": true,
+	}
+	return methods[name]
+}
+
+// проверяет только алфавит и отсутствие спецсимволов
+func isEnglishAndSafe(s string, isItFirstArg bool) bool {
+	if isItFirstArg {
+		for _, r := range s {
+			isEnglish := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+			isDigit := unicode.IsDigit(r)
+			isSpace := r == ' '
+
+			if !isEnglish && !isDigit && !isSpace {
 				return false
 			}
-			continue
 		}
-		// а дальше в любом регистре или пробел получается, хотя если в логе например путь какой-то, то ещё слэши бы сюда
-		// ну сказано без спецсимволов значит будет без спецсимволов
-		if (str_arg[i] >= 'a' && str_arg[i] <= 'z') ||
-			(str_arg[i] >= 'A' && str_arg[i] <= 'Z') ||
-			(str_arg[i] >= '0' && str_arg[i] <= '9') ||
-			str_arg[i] == ' ' {
-			continue
-		}
+	} else {
+		// тут уже может быть подчеркивание
+		for _, r := range s {
+			isLetter := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+			isDigit := r >= '0' && r <= '9'
+			isSpace := r == ' '
+			isUnderscore := r == '_'
 
-		return false
+			if !isLetter && !isDigit && !isSpace && !isUnderscore {
+				return false
+			}
+		}
 	}
 
 	return true
 }
 
-// пока максимально тупая проверка потом можно думать
-func containsSensitiveData(str_arg string) bool {
-	lower := strings.ToLower(str_arg)
+// проверяет сообщение по полному набору правил
+func isValidLogMessage(s string) bool {
+	if s == "" {
+		return false
+	}
+
+	runes := []rune(s)
+
+	if !unicode.IsLower(runes[0]) || runes[0] < 'a' || runes[0] > 'z' {
+		return false
+	}
+
+	return isEnglishAndSafe(s, true)
+}
+
+// достает текст из литералов, конкатенаций и имен переменных
+func recursiveExtractText(n ast.Node) string {
+	switch x := n.(type) {
+	case *ast.BasicLit:
+		if x.Kind == token.STRING {
+			return strings.ToLower(strings.Trim(x.Value, `"`))
+		}
+	case *ast.BinaryExpr:
+		if x.Op == token.ADD {
+			return recursiveExtractText(x.X) + " " + recursiveExtractText(x.Y)
+		}
+	case *ast.Ident:
+		// проверяем имя переменной
+		return strings.ToLower(x.Name)
+	case *ast.CallExpr:
+		// если внутри вызова лога есть другой вызов по типу Sprintf, проверяем его аргументы
+		var res []string
+		for _, arg := range x.Args {
+			res = append(res, recursiveExtractText(arg))
+		}
+		return strings.Join(res, " ")
+	}
+	return ""
+}
+
+func containsSensitiveData(s string) bool {
+	lower := strings.ToLower(s)
 	sensitive := []string{
 		"password", "token", "secret", "key", "auth",
+		"credential",
 	}
+
 	for _, word := range sensitive {
-		if strings.Contains(lower, word) {
-			return true
+		words := strings.Fields(lower)
+		for _, w := range words {
+			if w == word {
+				return true
+			}
+			// вхождение с пунктуацией
+			if strings.Contains(w, word) && (strings.HasSuffix(w, ":") || strings.HasSuffix(w, "=")) {
+				return true
+			}
 		}
 	}
 	return false
