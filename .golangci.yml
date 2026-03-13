@@ -8,6 +8,6 @@ linters:
   settings:
     custom:
       loglinter:
-        path: ./loglinter.so  # путь к плагину после сборки
+        path: ./loglinter.so
         description: "Линтер для проверки лог-сообщений"
         original-url: github.com/BleSSSeDDD/log-linter
